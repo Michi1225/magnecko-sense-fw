@@ -8,35 +8,36 @@ LEDController led_controller;
  * See TI LP5815 datasheet sections 7.3.4 and 7.6. */
 typedef enum { SOLID, BLINK, BREATHE, DOUBLE_PULSE } led_shape_t;
 typedef struct {
-    uint8_t rgb[3];
+    uint8_t rgb[3]; /* Relative color mix; normalized to a peak PWM of 255. */
     led_shape_t shape;
     uint8_t ramp, hold;
+    uint8_t brightness; /* 0--100 percent of the normalized color's maximum. */
 } led_preset_t;
 
 static const led_preset_t presets[LED_ANIMATION_COUNT] = {
-    [LED_ANIMATION_OFF] = {{0, 0, 0}, SOLID, 0, 0},
-    [LED_ANIMATION_ALL] = {{255, 255, 255}, SOLID, 0, 0},
-    [LED_ANIMATION_CONFIGURING] = {{0, 160, 160}, BREATHE, 10, 2},
-    [LED_ANIMATION_SENSOR_INIT_FAILED_IMU] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11},
-    [LED_ANIMATION_SENSOR_INIT_FAILED_LDC] = {{192, 0, 0}, BLINK, 0, 4},
-    [LED_ANIMATION_SENSOR_INIT_FAILED_TOF] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11},
-    [LED_ANIMATION_SENSOR_INIT_FAILED_MAG] = {{192, 0, 0}, BLINK, 0, 5},
-    [LED_ANIMATION_APPLICATION_RUNNING] = {{0, 192, 0}, SOLID, 0, 0},
-    [LED_ANIMATION_UNCAUGHT_EXCEPTION] = {{192, 0, 0}, BLINK, 0, 2},
-    [LED_ANIMATION_CHARGER_NOT_RESPONDING] = {{192, 0, 0}, BREATHE, 11, 4},
-    [LED_ANIMATION_CYAN] = {{0, 192, 192}, SOLID, 0, 0},
-    [LED_ANIMATION_GREEN] = {{0, 192, 0}, SOLID, 0, 0},
-    [LED_ANIMATION_FSBL_STARTED] = {{192, 72, 0}, BLINK, 0, 5},
-    [LED_ANIMATION_FSBL_LOADING] = {{192, 72, 0}, BLINK, 0, 2},
-    [LED_ANIMATION_FSBL_HANDOFF] = {{160, 0, 160}, SOLID, 0, 0},
-    [LED_ANIMATION_FSBL_ERROR] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11},
-    [LED_ANIMATION_APP_STARTED] = {{0, 0, 192}, BLINK, 0, 5},
-    [LED_ANIMATION_APP_INIT_FINISHED] = {{0, 160, 160}, DOUBLE_PULSE, 2, 11},
-    [LED_ANIMATION_APP_RANGING] = {{0, 192, 0}, BREATHE, 10, 2},
-    [LED_ANIMATION_APP_IDLE] = {{0, 0, 80}, BREATHE, 11, 4},
-    [LED_ANIMATION_APP_POWER_DOWN] = {{64, 24, 0}, SOLID, 0, 0},
-    [LED_ANIMATION_APP_RESETTING] = {{0, 160, 160}, BLINK, 0, 2},
-    [LED_ANIMATION_APP_FAULT] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11},
+    [LED_ANIMATION_OFF] = {{0, 0, 0}, SOLID, 0, 0, 0},
+    [LED_ANIMATION_ALL] = {{255, 255, 255}, SOLID, 0, 0, 100},
+    [LED_ANIMATION_CONFIGURING] = {{0, 160, 160}, BREATHE, 10, 2, 63},
+    [LED_ANIMATION_SENSOR_INIT_FAILED_IMU] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11, 75},
+    [LED_ANIMATION_SENSOR_INIT_FAILED_LDC] = {{192, 0, 0}, BLINK, 0, 4, 75},
+    [LED_ANIMATION_SENSOR_INIT_FAILED_TOF] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11, 75},
+    [LED_ANIMATION_SENSOR_INIT_FAILED_MAG] = {{192, 0, 0}, BLINK, 0, 5, 75},
+    [LED_ANIMATION_APPLICATION_RUNNING] = {{0, 192, 0}, SOLID, 0, 0, 75},
+    [LED_ANIMATION_UNCAUGHT_EXCEPTION] = {{192, 0, 0}, BLINK, 0, 2, 75},
+    [LED_ANIMATION_CHARGER_NOT_RESPONDING] = {{192, 0, 0}, BREATHE, 11, 4, 75},
+    [LED_ANIMATION_CYAN] = {{0, 192, 192}, SOLID, 0, 0, 75},
+    [LED_ANIMATION_GREEN] = {{0, 192, 0}, SOLID, 0, 0, 75},
+    [LED_ANIMATION_FSBL_STARTED] = {{192, 72, 0}, BLINK, 0, 5, 75},
+    [LED_ANIMATION_FSBL_LOADING] = {{192, 72, 0}, BLINK, 0, 2, 75},
+    [LED_ANIMATION_FSBL_HANDOFF] = {{160, 0, 160}, SOLID, 0, 0, 63},
+    [LED_ANIMATION_FSBL_ERROR] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11, 75},
+    [LED_ANIMATION_APP_STARTED] = {{0, 0, 192}, BLINK, 0, 5, 75},
+    [LED_ANIMATION_APP_INIT_FINISHED] = {{0, 160, 160}, DOUBLE_PULSE, 2, 11, 63},
+    [LED_ANIMATION_APP_RANGING] = {{0, 192, 0}, BREATHE, 10, 2, 75},
+    [LED_ANIMATION_APP_IDLE] = {{0, 0, 160}, BREATHE, 11, 4, 100},
+    [LED_ANIMATION_APP_POWER_DOWN] = {{64, 24, 0}, SOLID, 0, 0, 25},
+    [LED_ANIMATION_APP_RESETTING] = {{0, 160, 160}, BLINK, 0, 2, 63},
+    [LED_ANIMATION_APP_FAULT] = {{192, 0, 0}, DOUBLE_PULSE, 2, 11, 75},
 };
 
 /** @brief Guard complete I2C transactions without disabling IRQs during transfers. */
@@ -67,23 +68,32 @@ static HAL_StatusTypeDef led_write(uint8_t address, const void *data, uint16_t s
 /** @brief Build all engines afresh so earlier patterns cannot leak into new states. */
 static void led_build(LEDController *controller, const led_preset_t *preset)
 {
+    unsigned brightness = preset->brightness > 100U ? 100U : preset->brightness;
+    unsigned maximum = preset->rgb[0];
+    for (unsigned i = 1; i < 3; ++i)
+        if (preset->rgb[i] > maximum) maximum = preset->rgb[i];
     memset(controller->patterns, 0, sizeof(controller->patterns));
     memset(controller->engines, 0, sizeof(controller->engines));
     memset(&controller->config, 0, sizeof(controller->config));
     controller->config.enable = controller->config.instablink_dis = 1;
-    controller->config.out0_en = preset->rgb[0] != 0;
-    controller->config.out1_en = preset->rgb[1] != 0;
-    controller->config.out2_en = preset->rgb[2] != 0;
+    /* Keep the original channel selection at nonzero brightness: rounding a
+     * small PWM to zero must not change the color-dependent drive settings. */
+    controller->config.out0_en = brightness && preset->rgb[0] != 0;
+    controller->config.out1_en = brightness && preset->rgb[1] != 0;
+    controller->config.out2_en = brightness && preset->rgb[2] != 0;
     controller->config.out0_auto_en = controller->config.out1_auto_en = controller->config.out2_auto_en = 1;
     controller->config.out0_exp_en = controller->config.out1_exp_en = controller->config.out2_exp_en = 1;
     controller->config.out0_engine_ch = 0;
     controller->config.out1_engine_ch = 1;
     controller->config.out2_engine_ch = 2;
     for (unsigned i = 0; i < 3; ++i) {
-        if (!preset->rgb[i]) continue;
+        if (!brightness || !preset->rgb[i]) continue;
         LED_Controller_Pattern_t *pattern = &controller->patterns[i];
         pattern->repeat = 15;
-        uint8_t peak = preset->rgb[i];
+        /* A nonzero RGB component guarantees maximum != 0. Round once after
+         * applying both normalization and brightness to retain the color mix. */
+        uint8_t peak = (uint8_t)(((unsigned)preset->rgb[i] * 255U * brightness + maximum * 50U) /
+                                 (maximum * 100U));
         if (preset->shape == SOLID) {
             memset(pattern->PWM, peak, sizeof(pattern->PWM));
             pattern->sloper0 = 11; /* Nonzero duration, even for a steady color. */
@@ -195,7 +205,7 @@ HAL_StatusTypeDef LEDController_SetFaultCode(LEDController *controller,
     if (!led_acquire(controller)) return HAL_BUSY;
     const led_preset_t preset = {
         {(color & 1U) ? 192 : 0, (color & 2U) ? 72 : 0, (color & 4U) ? 192 : 0},
-        BLINK, 0, 4 /* 200 ms on, 200 ms off. */
+        BLINK, 0, 4, 75 /* 200 ms on, 200 ms off; retain the diagnostic level. */
     };
     led_build(controller, &preset);
     for (unsigned i = 0; i < 3; ++i) {

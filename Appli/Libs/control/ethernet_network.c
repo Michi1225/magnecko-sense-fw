@@ -1,5 +1,6 @@
 #include "ethernet_network.h"
 #include "ethernet_link.h"
+#include "ethernet_mdns.h"
 #include "app_events.h"
 #include "app_netxduo.h"
 #include "main.h"
@@ -97,6 +98,7 @@ void ethernet_network_poll(NX_IP *ip, bool up, bool phy_up, bool phy_error)
     __set_PRIMASK(irq);
     previous_up = up;
     previous_phy = phy_up;
+    ethernet_mdns_poll(ip, ready, next_address, next_mask);
 }
 
 void ethernet_network_status_packet(uint8_t p[NETWORK_STATUS_SIZE])

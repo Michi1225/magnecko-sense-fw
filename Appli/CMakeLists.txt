@@ -53,6 +53,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE MAGNECKO_DHCP=$<BOOL:${MAGNEC
 target_sources(netxduo PRIVATE ../Middlewares/ST/netxduo/addons/dhcp/nxd_dhcp_client.c)
 target_include_directories(netxduo PUBLIC ../Middlewares/ST/netxduo/addons/dhcp)
 target_compile_definitions(netxduo PUBLIC NX_DHCP_CLIENT_USER_CREATE_PACKET_POOL NX_DHCP_CLIENT_SEND_ARP_PROBE)
+target_sources(netxduo PRIVATE ../Middlewares/ST/netxduo/addons/mdns/nxd_mdns.c)
+target_include_directories(netxduo PUBLIC ../Middlewares/ST/netxduo/addons/mdns)
+target_compile_definitions(netxduo PUBLIC NX_MDNS_DISABLE_CLIENT)
 # Optimize the complete application and network stack in Release builds.
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     foreach(release_target ${CMAKE_PROJECT_NAME} STM32_Drivers netxduo threadx usbx STM32_USBPD_Library)
@@ -115,6 +118,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ./Libs/control/imu_stream.c
     ./Libs/control/imu_control.c
     ./Libs/control/ethernet_network.c
+    ./Libs/control/ethernet_mdns.c
     ./Libs/control/ethernet_send.c
     ../common/s28hs512t/semper_flash.c
     ../common/s28hs512t/s28hs512t.c

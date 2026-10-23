@@ -2,6 +2,7 @@
  * accesses; the existing one-time parameter read has finished before it starts. */
 #include "firmware_update.h"
 #include "../../../common/firmware/fw_update.c"
+#include "../../../common/firmware/fw_history.c"
 #include "../../../common/firmware/fw_fsbl.c"
 #include "../../../common/firmware/fw_flash.c"
 #include "../../../common/firmware/fw_wire.c"
@@ -10,6 +11,7 @@
 #include "app_events.h"
 #include "tof_control.h"
 #include "ethernet_link.h"
+#include "device_parameters.h"
 #include "xspi.h"
 
 static TX_THREAD dfu_thread;
@@ -21,6 +23,8 @@ static ULONG dfu_usb_storage[32*sizeof(dfu_usb_item_t)/sizeof(ULONG)];
 static volatile bool dfu_initialized,dfu_suppress_telemetry;
 static volatile uint32_t dfu_usb_heartbeat;
 static fw_update_t dfu_update;
+static fw_history_t dfu_history={.last_error=FW_NOT_READY};
+static fw_parameters_t dfu_parameters;
 static fw_fsbl_t dfu_fsbl __attribute__((section(".fsbl_workspace"),aligned(32)));
 static fw_parser_t dfu_usb_parser,dfu_tcp_parser;
 static NX_TCP_SOCKET dfu_socket;
@@ -58,11 +62,12 @@ void firmware_update_usb_feed(const uint8_t *data,size_t size,uint32_t session)
 static void dfu_idle(void) { tx_thread_sleep(1); }
 static void dfu_boot_idle(void) { fw_watchdog_refresh();tx_thread_sleep(1); }
 static bool dfu_uploading(void)
-{ return dfu_update.uploading || dfu_fsbl.state==FW_FSBL_RECEIVING; }
+{ return dfu_update.uploading || dfu_fsbl.state==FW_FSBL_RECEIVING || dfu_parameters.state==FW_PARAMETERS_RECEIVING; }
 static void dfu_abort_upload(void)
 {
     if(dfu_fsbl.state==FW_FSBL_RECEIVING)(void)fw_fsbl_abort(&dfu_fsbl);
     if(dfu_update.uploading)(void)fw_abort(&dfu_update);
+    fw_parameters_abort(&dfu_parameters);
 }
 /** @brief Close the DFU TCP session and abort an upload owned by that client. */
 static void dfu_disconnect(void)
@@ -108,11 +113,45 @@ static void dfu_fsbl_status(uint8_t p[FW_FSBL_STATUS_SIZE],uint32_t id,uint32_t 
 {
     memset(p,0,FW_FSBL_STATUS_SIZE);dfu_status(p,id,op,result);
     fw_put32(p+8,FW_FSBL_STATUS_SIZE-16U);p[12]=2;
-    fw_put32(p+64,1U); /* Capability bit 0: RAM-staged FSBL replacement. */
+    fw_put32(p+64,7U); /* RAM-staged FSBL, provenance, and persistent history. */
     fw_put32(p+68,dfu_fsbl.state);fw_put32(p+72,dfu_fsbl.received);
     fw_put32(p+76,dfu_fsbl.incoming.size);fw_put32(p+80,dfu_fsbl.error);
     fw_put32(p+84,dfu_fsbl.active.size);fw_put32(p+88,HAL_GetTick());
     memcpy(p+92,dfu_fsbl.active.sha256,32);memcpy(p+124,dfu_fsbl.incoming.sha256,32);
+}
+static void dfu_parameters_status(uint8_t p[FW_PARAMETERS_STATUS_SIZE],uint32_t id,uint32_t op,int result)
+{
+    memset(p,0,FW_PARAMETERS_STATUS_SIZE);dfu_fsbl_status(p,id,op,result);
+    fw_put32(p+8,FW_PARAMETERS_STATUS_SIZE-16U);p[12]=3;
+    fw_put32(p+156,dfu_parameters.state);fw_put32(p+160,dfu_parameters.received);
+    fw_put32(p+164,dfu_parameters.total);fw_put32(p+168,dfu_parameters.error);
+    fw_put32(p+172,dfu_parameters.target);
+}
+static bool dfu_parameters_match(uint32_t target,uint32_t size,const uint8_t *hash)
+{
+    return dfu_parameters.state!=FW_PARAMETERS_READY ||
+        (dfu_parameters.target==target && dfu_parameters.image_size==size && !memcmp(dfu_parameters.image_sha256,hash,32));
+}
+/** @brief Verify the physical image before committing only its generated parameter records. */
+static int dfu_parameters_apply(const uint8_t *expected)
+{
+    if(memcmp(expected,dfu_parameters.image_sha256,32))return FW_BAD_HASH;
+    fw_image_t image;int result;
+    if(dfu_parameters.target==FW_PARAMETERS_FSBL){
+        if(dfu_fsbl.state!=FW_FSBL_INSTALLED && dfu_fsbl.state!=FW_FSBL_IDLE)return FW_NOT_READY;
+        result=fsbl_read_active(&dfu_fsbl);image=dfu_fsbl.active;
+    } else {
+        if(dfu_parameters.target>1)return FW_BAD_REQUEST;
+        image=dfu_update.meta.image[dfu_parameters.target];
+        result=fw_validate(&dfu_update,dfu_parameters.target,&image,true);
+    }
+    if(!result)result=fw_parameters_apply(&dfu_parameters,dfu_parameters.target,&image);
+    dfu_parameters.error=(uint32_t)result;
+    (void)fw_history_record(&dfu_history,result?FW_HISTORY_PARAMETERS_FAILED:FW_HISTORY_PARAMETERS_APPLIED,
+        dfu_parameters.target,(uint32_t)result,dfu_update.meta.generation,dfu_update.meta.flags,
+        result?NULL:&image);
+    if(!result)device_parameters_publish(dfu_parameters.merged,dfu_parameters.size-1U);
+    return result;
 }
 typedef struct { uint32_t route,session; } dfu_route_t;
 /** @brief Supply the ROM's default clock inputs and restore the external flash protocol. */
@@ -137,14 +176,25 @@ static void dfu_command(void *context,const uint8_t *p,uint32_t size)
     }
     uint32_t id=fw_get32(p+4),length=fw_get32(p+8),op=p[14]|((uint32_t)p[15]<<8);
     int result=FW_BAD_REQUEST;
+    if(id && op==FW_OP_HISTORY && length==4){
+        uint8_t reply[FW_HISTORY_REPLY_SIZE]={0};uint32_t count=0,next=FW_NONE;
+        result=fw_history_page(&dfu_history,fw_get32(p+16),reply+40,&count,&next);
+        memcpy(reply,"DFUS",4);fw_put32(reply+4,id);fw_put32(reply+8,24+count*FW_HISTORY_RECORD_SIZE);
+        reply[12]=4;reply[14]=FW_OP_HISTORY;
+        fw_put32(reply+16,(uint32_t)result);fw_put32(reply+20,1);fw_put32(reply+24,FW_HISTORY_CAPACITY);
+        fw_put32(reply+28,count);fw_put32(reply+32,next);fw_put32(reply+36,dfu_history.last_error);
+        (void)dfu_send(route->route,route->session,reply,40+count*FW_HISTORY_RECORD_SIZE);return;
+    }
     bool owner=dfu_owner_route==route->route && dfu_owner_session==route->session;
     if(id && op==FW_OP_STATUS && !length)result=dfu_start_result;
     else if(id && op==FW_OP_FSBL_STATUS && !length)result=dfu_start_result;
+    else if(id && op==FW_OP_PARAMETERS_STATUS && !length)result=dfu_start_result;
 #ifndef DEV_MODE
     else if(dfu_start_result==FW_OK && id && !dfu_reset_at){
         if(op==FW_OP_BEGIN && length==40){
             if(dfu_running!=dfu_update.meta.confirmed || dfu_update.meta.pending!=FW_NONE ||
-               dfu_fsbl.state!=FW_FSBL_IDLE)result=FW_NOT_READY;
+               dfu_fsbl.state!=FW_FSBL_IDLE || dfu_parameters.state==FW_PARAMETERS_RECEIVING ||
+               !dfu_parameters_match(dfu_running^1U,fw_get32(p+16),p+24))result=FW_NOT_READY;
             else {
                 dfu_suppress_telemetry=true;
                 result=fw_begin(&dfu_update,fw_get32(p+16),p+24,fw_get32(p+20));
@@ -155,11 +205,14 @@ static void dfu_command(void *context,const uint8_t *p,uint32_t size)
         else if(op==FW_OP_DATA && length>=12 && length<=FW_CHUNK_SIZE+8)
             result=owner?fw_data(&dfu_update,fw_get32(p+16),p+24,length-8,fw_get32(p+20)):FW_BUSY;
         else if(op==FW_OP_FINISH && !length)result=owner?fw_finish(&dfu_update):FW_BUSY;
-        else if(op==FW_OP_ABORT && !length)result=(!dfu_owner_route || owner)?fw_abort(&dfu_update):FW_BUSY;
+        else if(op==FW_OP_ABORT && !length){
+            result=(!dfu_owner_route || owner)?fw_abort(&dfu_update):FW_BUSY;
+            if(!result)fw_parameters_abort(&dfu_parameters);
+        }
         else if(op==FW_OP_CLEAR && !length && !dfu_update.uploading)result=fw_clear_warnings(&dfu_update);
         else if(op==FW_OP_FSBL_BEGIN && length==36){
             if(dfu_running!=dfu_update.meta.confirmed || dfu_update.meta.pending!=FW_NONE ||
-               dfu_uploading())result=FW_NOT_READY;
+               dfu_uploading() || !dfu_parameters_match(FW_PARAMETERS_FSBL,fw_get32(p+16),p+20))result=FW_NOT_READY;
             else {
                 result=fw_fsbl_begin(&dfu_fsbl,fw_get32(p+16),p+20);
                 if(result==FW_OK){dfu_owner_route=route->route;dfu_owner_session=route->session;dfu_suppress_telemetry=true;}
@@ -168,15 +221,31 @@ static void dfu_command(void *context,const uint8_t *p,uint32_t size)
         else if(op==FW_OP_FSBL_DATA && length>=12 && length<=FW_CHUNK_SIZE+8)
             result=owner?fw_fsbl_data(&dfu_fsbl,fw_get32(p+16),p+24,length-8,fw_get32(p+20)):FW_BUSY;
         else if(op==FW_OP_FSBL_FINISH && !length)result=owner?fw_fsbl_finish(&dfu_fsbl):FW_BUSY;
-        else if(op==FW_OP_FSBL_ABORT && !length)
+        else if(op==FW_OP_FSBL_ABORT && !length){
             result=(!dfu_owner_route || owner)?fw_fsbl_abort(&dfu_fsbl):FW_BUSY;
+            if(!result)fw_parameters_abort(&dfu_parameters);
+        }
         else if(op==FW_OP_FSBL_APPLY && length==32 && !dfu_uploading() && dfu_update.meta.pending==FW_NONE){
             dfu_suppress_telemetry=true;
             result=fw_fsbl_apply(&dfu_fsbl,p+16);
         }
+        else if(op==FW_OP_PARAMETERS_BEGIN && length==76 && !dfu_uploading()){
+            result=fw_parameters_begin(&dfu_parameters,fw_get32(p+16),fw_get32(p+20),fw_get32(p+24),p+28,p+60);
+            if(!result){dfu_owner_route=route->route;dfu_owner_session=route->session;dfu_suppress_telemetry=true;}
+        }
+        else if(op==FW_OP_PARAMETERS_DATA && length>8 && length<=FW_CHUNK_SIZE+8)
+            result=owner?fw_parameters_data(&dfu_parameters,fw_get32(p+16),p+24,length-8,fw_get32(p+20)):FW_BUSY;
+        else if(op==FW_OP_PARAMETERS_FINISH && !length)result=owner?fw_parameters_finish(&dfu_parameters):FW_BUSY;
+        else if(op==FW_OP_PARAMETERS_ABORT && !length && !dfu_update.uploading && dfu_fsbl.state!=FW_FSBL_RECEIVING){
+            result=(!dfu_owner_route || owner)?FW_OK:FW_BUSY;
+            if(!result)fw_parameters_abort(&dfu_parameters);
+        }
+        else if(op==FW_OP_PARAMETERS_APPLY && length==32 && !dfu_uploading()){
+            dfu_suppress_telemetry=true;result=dfu_parameters_apply(p+16);
+        }
         else if(op==FW_OP_RESET && !length){
             result=FW_NOT_READY;
-            if(!dfu_uploading() && dfu_fsbl.state!=FW_FSBL_RECOVERY &&
+            if(!dfu_uploading() && dfu_parameters.state!=FW_PARAMETERS_READY && dfu_fsbl.state!=FW_FSBL_RECOVERY &&
                ((dfu_update.meta.pending!=FW_NONE && !dfu_update.meta.trial) || dfu_fsbl.state==FW_FSBL_INSTALLED)){
                 result=dfu_prepare_reset();
             }
@@ -185,9 +254,11 @@ static void dfu_command(void *context,const uint8_t *p,uint32_t size)
 #else
     else if(id)result=FW_NOT_READY; /* SRAM development images never mutate boot metadata/slots. */
 #endif
-    if(owner || ((op==FW_OP_BEGIN || op==FW_OP_FSBL_BEGIN) && result==FW_OK))dfu_last_activity=HAL_GetTick();
-    uint8_t reply[FW_FSBL_STATUS_SIZE];uint32_t reply_size=FW_STATUS_SIZE;
-    if(op>=FW_OP_FSBL_STATUS && op<=FW_OP_FSBL_ABORT){
+    if(owner || ((op==FW_OP_BEGIN || op==FW_OP_FSBL_BEGIN || op==FW_OP_PARAMETERS_BEGIN) && result==FW_OK))dfu_last_activity=HAL_GetTick();
+    uint8_t reply[FW_PARAMETERS_STATUS_SIZE];uint32_t reply_size=FW_STATUS_SIZE;
+    if(op>=FW_OP_PARAMETERS_STATUS && op<=FW_OP_PARAMETERS_APPLY){
+        dfu_parameters_status(reply,id,op,result);reply_size=FW_PARAMETERS_STATUS_SIZE;
+    } else if(op>=FW_OP_FSBL_STATUS && op<=FW_OP_FSBL_ABORT){
         dfu_fsbl_status(reply,id,op,result);reply_size=FW_FSBL_STATUS_SIZE;
     } else dfu_status(reply,id,op,result);
     bool sent=dfu_send(route->route,route->session,reply,reply_size);
@@ -200,9 +271,16 @@ static void dfu_thread_entry(ULONG argument)
     (void)argument;
     fw_flash_t flash={&dfu_flash,dfu_idle};
     fw_flash_t boot_flash={&dfu_flash,dfu_boot_idle};
+    fw_io_t parameters_io=fw_flash_parameters_io(&boot_flash);
+    fw_parameters_open(&dfu_parameters,&parameters_io);
     memset(&dfu_fsbl,0,offsetof(fw_fsbl_t,staging));
     if(SEMPER_Init(&dfu_flash,&hxspi1)==SEMPER_OK){
         fw_io_t io=fw_flash_io(&flash);dfu_start_result=fw_open(&dfu_update,&io);
+        fw_io_t history_io=fw_flash_history_io(&boot_flash);
+        (void)fw_history_open(&dfu_history,&history_io,HAL_GetTick);
+#ifndef DEV_MODE
+        dfu_update.history=&dfu_history;
+#endif
         /* Only the new FSBL creates/adopts boot metadata. Refuse writes when
          * running with a legacy FSBL rather than pretending it supports A/B. */
         if(dfu_start_result==FW_OK && dfu_update.record<0)dfu_start_result=FW_NOT_READY;
@@ -214,6 +292,10 @@ static void dfu_thread_entry(ULONG argument)
         }
         fw_io_t boot_io=fw_flash_fsbl_io(&boot_flash);
         (void)fw_fsbl_open(&dfu_fsbl,&boot_io);
+#ifndef DEV_MODE
+        dfu_fsbl.history=&dfu_history;
+#endif
+        dfu_parameters.error=(uint32_t)fw_parameters_recover(&parameters_io,dfu_parameters.previous);
     }
     else dfu_start_result=FW_IO_ERROR;
     bool socket_ready=nx_tcp_socket_create(nx_get_ip(),&dfu_socket,"Firmware update",NX_IP_NORMAL,

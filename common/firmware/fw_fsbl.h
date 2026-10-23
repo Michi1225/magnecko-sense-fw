@@ -8,6 +8,7 @@
 enum { FW_FSBL_IDLE, FW_FSBL_RECEIVING, FW_FSBL_READY, FW_FSBL_INSTALLED, FW_FSBL_RECOVERY };
 typedef struct {
     fw_io_t io;
+    struct fw_history *history;
     uint32_t state, received, error;
     fw_image_t active, incoming, backup_image;
     uint8_t staging[FW_FSBL_MAX], backup[FW_FSBL_MAX];

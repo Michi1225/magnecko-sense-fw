@@ -4,6 +4,8 @@
 #define DEVICE_PARAMETERS_MAX_JSON 16384U
 /** @brief Read device parameters from flash and prepare JSON telemetry or an error payload. */
 void device_parameters_init(void);
-/** @brief Return the cached PARM packet and its byte length. */
-uint8_t *device_parameters_packet(uint32_t *size);
+/** @brief Publish verified parameter JSON without racing telemetry readers. */
+void device_parameters_publish(const uint8_t *json,uint32_t length);
+/** @brief Copy a consistent PARM snapshot before sending on either transport. */
+uint32_t device_parameters_copy_packet(uint8_t *destination,uint32_t capacity);
 #endif

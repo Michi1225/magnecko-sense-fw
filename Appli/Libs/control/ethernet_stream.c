@@ -130,8 +130,8 @@ void ethernet_stream_thread_entry(ULONG argument)
         ULONG now = tx_time_get();
         if ((ULONG)(now - last_parameters) >= 2U * TX_TIMER_TICKS_PER_SECOND)
         {
-            uint32_t size;
-            UCHAR *parameters = device_parameters_packet(&size);
+            static UCHAR parameters[16U+DEVICE_PARAMETERS_MAX_JSON];
+            uint32_t size=device_parameters_copy_packet(parameters,sizeof(parameters));
             if (size) write_transports(parameters, size);
             last_parameters = now;
         }

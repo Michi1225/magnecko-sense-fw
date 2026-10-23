@@ -1,5 +1,7 @@
 #include "fw_flash.h"
 #include "fw_fsbl.h"
+#include "fw_parameters.h"
+#include "fw_history.h"
 
 /** @brief Wait for flash readiness with a timeout and an optional idle callback. */
 static int fw_flash_wait(fw_flash_t *f)
@@ -72,6 +74,50 @@ static int fw_flash_fsbl_erase(void *ctx,uint32_t a)
 /** @brief Separate, narrowly bounded IO for explicitly requested bootloader installation. */
 fw_io_t fw_flash_fsbl_io(fw_flash_t *f)
 { return (fw_io_t){f,fw_flash_fsbl_read,fw_flash_fsbl_write,fw_flash_fsbl_erase}; }
+static bool fw_flash_parameters_range(uint32_t a,uint32_t n)
+{ return n && a<FW_PARAMETERS_END && n<=FW_PARAMETERS_END-a; }
+static int fw_flash_parameters_read(void *ctx,uint32_t a,void *p,uint32_t n)
+{ return fw_flash_parameters_range(a,n)?fw_flash_read(ctx,a,p,n):-1; }
+static int fw_flash_parameters_write(void *ctx,uint32_t a,const void *p,uint32_t n)
+{
+    fw_flash_t *f=ctx;
+    if(!fw_flash_parameters_range(a,n) || (a&15U) || (n&15U))return -1;
+    if(f->idle)f->idle();
+    if(fw_flash_wait(f) || SEMPER_Write(f->flash,a,p,n)!=SEMPER_OK)return -1;
+    return fw_flash_wait(f);
+}
+static int fw_flash_parameters_erase(void *ctx,uint32_t a)
+{
+    fw_flash_t *f=ctx;
+    if(a%FW_PARAMETERS_SECTOR || !fw_flash_parameters_range(a,FW_PARAMETERS_SECTOR))return -1;
+    if(f->idle)f->idle();
+    if(fw_flash_wait(f) || SEMPER_Erase4K(f->flash,a)!=SEMPER_OK)return -1;
+    return fw_flash_wait(f);
+}
+fw_io_t fw_flash_parameters_io(fw_flash_t *f)
+{ return (fw_io_t){f,fw_flash_parameters_read,fw_flash_parameters_write,fw_flash_parameters_erase}; }
+static bool fw_flash_history_range(uint32_t a,uint32_t n)
+{ return n && a>=FW_HISTORY_BASE && a-FW_HISTORY_BASE<FW_HISTORY_SIZE && n<=FW_HISTORY_SIZE-(a-FW_HISTORY_BASE); }
+static int fw_flash_history_read(void *ctx,uint32_t a,void *p,uint32_t n)
+{ return fw_flash_history_range(a,n)?fw_flash_read(ctx,a,p,n):-1; }
+static int fw_flash_history_write(void *ctx,uint32_t a,const void *p,uint32_t n)
+{
+    fw_flash_t *f=ctx;
+    if(!fw_flash_history_range(a,n) || (a&15U) || (n&15U))return -1;
+    if(f->idle)f->idle();
+    if(fw_flash_wait(f) || SEMPER_Write(f->flash,a,p,n)!=SEMPER_OK)return -1;
+    return fw_flash_wait(f);
+}
+static int fw_flash_history_erase(void *ctx,uint32_t a)
+{
+    fw_flash_t *f=ctx;
+    if(a%FW_ERASE_SIZE || !fw_flash_history_range(a,FW_ERASE_SIZE))return -1;
+    if(f->idle)f->idle();
+    if(fw_flash_wait(f) || SEMPER_Erase256K(f->flash,a)!=SEMPER_OK)return -1;
+    return fw_flash_wait(f);
+}
+fw_io_t fw_flash_history_io(fw_flash_t *f)
+{ return (fw_io_t){f,fw_flash_history_read,fw_flash_history_write,fw_flash_history_erase}; }
 /** @brief Restore the single-line SPI protocol expected by the boot ROM after a CPU reset. */
 int fw_flash_prepare_reset(fw_flash_t *f)
 {

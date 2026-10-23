@@ -37,6 +37,7 @@ typedef struct {
     int (*erase)(void *, uint32_t);
 } fw_io_t;
 typedef struct { uint32_t size, version; uint8_t sha256[32]; } fw_image_t;
+struct fw_history;
 typedef struct {
     uint32_t generation, confirmed, pending, trial, flags, last_error;
     fw_image_t image[2];
@@ -48,6 +49,7 @@ typedef struct {
     bool uploading;
     uint32_t target, received;
     fw_image_t incoming;
+    struct fw_history *history; /* Optional diagnostic journal; never boot authority. */
 } fw_update_t;
 
 /** @brief Compute the reflected IEEE CRC-32 of a byte sequence. */

@@ -1,11 +1,13 @@
 /* Included once from FSBL main.c's USER CODE section. Keeping the integration
  * here avoids edits to CubeMX-generated source lists and boot middleware. */
 #include "fw_update.c"
+#include "fw_history.c"
 #include "fw_flash.c"
 #include "fw_handoff.h"
 #include "LEDController.h"
 extern SEMPER_Handle_t Flash;
 static fw_update_t fw_boot_state;
+static fw_history_t fw_boot_history;
 static bool fw_boot_led_ready;
 /* Retained as debugger symbols when debug access is available. LED indications
  * also work with BOOT1=0 and do not depend on a connected debugger. */
@@ -49,6 +51,9 @@ static int fw_boot_run(void)
     LEDController_SetAnimation(&led_controller, LED_ANIMATION_FSBL_LOADING);
     int result=fw_open(&fw_boot_state,&io);
     if(result)return result;
+    fw_io_t history_io=fw_flash_history_io(&flash);
+    (void)fw_history_open(&fw_boot_history,&history_io,NULL);
+    fw_boot_state.history=&fw_boot_history;
     uint32_t slot;bool trial;
     fw_boot_stage=4U; /* Validate and select a slot. */
     result=fw_boot_select(&fw_boot_state,&slot,&trial);

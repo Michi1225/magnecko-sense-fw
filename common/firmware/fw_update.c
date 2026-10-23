@@ -1,4 +1,5 @@
 #include "fw_update.h"
+#include "fw_history.h"
 #include <string.h>
 
 /* Portable update policy. All flash offsets and lengths are checked here;
@@ -136,6 +137,8 @@ int fw_store(fw_update_t *f,const fw_metadata_t *next)
        f->io.read(f->io.context,address,verify,sizeof(verify)) || memcmp(r,verify,sizeof(r)))return FW_IO_ERROR;
     f->meta=m;f->record=dest;return FW_OK;
 }
+static void fw_log(fw_update_t *f,uint32_t event,uint32_t target,int result,const fw_image_t *image)
+{ (void)fw_history_record(f->history,event,target,(uint32_t)result,f->meta.generation,f->meta.flags,image); }
 /** @brief Verify an image's header, vectors, checksum, and optional recorded SHA-256 digest. */
 int fw_validate(fw_update_t *f,uint32_t slot,fw_image_t *image,bool compare)
 {
@@ -180,14 +183,16 @@ int fw_boot_select(fw_update_t *f,uint32_t *slot,bool *trial)
         /* Migration: existing v2.3 slot A/B images have no update metadata yet.
          * Adopt only images that pass all header/vector/checksum checks. */
         for(unsigned i=0;i<2;++i)if(fw_validate(f,i,&m.image[i],false)==FW_OK){if(!found)m.confirmed=i;found=true;}
-        if(!found)return FW_BAD_IMAGE;
+        if(!found){fw_log(f,FW_HISTORY_NO_IMAGE,FW_NONE,FW_BAD_IMAGE,NULL);return FW_BAD_IMAGE;}
         m.flags=FW_CONFIRMED|FW_METADATA_RESET;
         if(fw_store(f,&m))return FW_IO_ERROR;
+        fw_log(f,FW_HISTORY_ADOPTED,m.confirmed,FW_OK,&m.image[m.confirmed]);
     }
     if(f->meta.flags&FW_UPLOADING){
         m=f->meta;
         m.flags=(m.flags&~FW_UPLOADING)|FW_UPLOAD_FAILED;m.last_error=FW_NOT_READY;
         if(fw_store(f,&m))return FW_IO_ERROR;
+        fw_log(f,FW_HISTORY_FAILED,m.confirmed^1U,FW_NOT_READY,NULL);
     }
     if(f->meta.pending!=FW_NONE){
         m=f->meta;uint32_t candidate=m.pending;
@@ -195,22 +200,27 @@ int fw_boot_select(fw_update_t *f,uint32_t *slot,bool *trial)
         if(result==FW_OK){
             m.trial=1;
             if(fw_store(f,&m))return FW_IO_ERROR;
+            fw_log(f,FW_HISTORY_TRIAL,candidate,FW_OK,&m.image[candidate]);
             *slot=candidate;*trial=true;return FW_OK;
         }
+        fw_image_t rejected=m.image[candidate];
         m.image[candidate].size=0;m.pending=FW_NONE;m.trial=0;
         m.flags=(m.flags & ~FW_CONFIRMED)|FW_FALLBACK;m.last_error=result;
         if(fw_store(f,&m))return FW_IO_ERROR;
+        fw_log(f,FW_HISTORY_ROLLBACK,candidate,result,&rejected);
     }
     uint32_t selected=f->meta.confirmed;
     if(fw_slot_valid(f,selected)!=FW_OK){
         uint32_t other=selected^1U;
         if(fw_slot_valid(f,other)!=FW_OK){
             m=f->meta;m.flags|=FW_NO_VALID_IMAGE;m.last_error=FW_BAD_IMAGE;
-            (void)fw_store(f,&m);return FW_BAD_IMAGE;
+            (void)fw_store(f,&m);fw_log(f,FW_HISTORY_NO_IMAGE,FW_NONE,FW_BAD_IMAGE,NULL);return FW_BAD_IMAGE;
         }
+        fw_image_t rejected=f->meta.image[selected];
         m=f->meta;m.image[selected].size=0;m.confirmed=other;
         m.flags=(m.flags&~FW_CONFIRMED)|FW_FALLBACK;m.last_error=FW_BAD_IMAGE;
         if(fw_store(f,&m))return FW_IO_ERROR;
+        fw_log(f,FW_HISTORY_ROLLBACK,selected,FW_BAD_IMAGE,&rejected);
         selected=other;
     }
     *slot=selected;return FW_OK;
@@ -220,7 +230,9 @@ static int fw_failed(fw_update_t *f,int result)
 {
     f->uploading=false;
     fw_metadata_t m=f->meta;m.flags=(m.flags&~FW_UPLOADING)|FW_UPLOAD_FAILED;m.last_error=(uint32_t)result;
-    return fw_store(f,&m)==FW_OK?result:FW_IO_ERROR;
+    int stored=fw_store(f,&m);
+    fw_log(f,FW_HISTORY_FAILED,f->target,result,&f->incoming);
+    return stored==FW_OK?result:FW_IO_ERROR;
 }
 /** @brief Invalidate and erase the inactive slot before starting a bounded image upload. */
 int fw_begin(fw_update_t *f,uint32_t size,const uint8_t sha[32],uint32_t version)
@@ -234,6 +246,7 @@ int fw_begin(fw_update_t *f,uint32_t size,const uint8_t sha[32],uint32_t version
     m.flags=(m.flags&FW_WARNINGS)|FW_UPLOADING;m.last_error=FW_OK;
     /* Invalidate the inactive descriptor durably BEFORE touching that slot. */
     if(fw_store(f,&m))return FW_IO_ERROR;
+    fw_log(f,FW_HISTORY_UPLOAD_STARTED,f->target,FW_OK,&f->incoming);
     for(uint32_t pos=0;pos<size;pos+=FW_ERASE_SIZE)
         if(f->io.erase(f->io.context,fw_slot_address(f->target)+pos))return fw_failed(f,FW_IO_ERROR);
     f->uploading=true;return FW_OK;
@@ -258,7 +271,7 @@ int fw_finish(fw_update_t *f)
     fw_metadata_t m=f->meta;m.image[f->target]=image;m.pending=f->target;m.trial=0;
     m.flags=(m.flags&FW_WARNINGS)|FW_UPLOADED|FW_VERIFIED;m.last_error=FW_OK;
     if(fw_store(f,&m))return fw_failed(f,FW_IO_ERROR);
-    f->uploading=false;return FW_OK;
+    f->uploading=false;fw_log(f,FW_HISTORY_VERIFIED,f->target,FW_OK,&image);return FW_OK;
 }
 /** @brief Cancel an unfinished upload and persist the aborted flag. */
 int fw_abort(fw_update_t *f)
@@ -266,7 +279,7 @@ int fw_abort(fw_update_t *f)
     if(f->meta.pending!=FW_NONE)return FW_BUSY;
     if(!(f->meta.flags&FW_UPLOADING))return FW_OK;
     fw_metadata_t m=f->meta;m.flags=(m.flags&~FW_UPLOADING)|FW_UPLOAD_ABORTED;m.last_error=FW_OK;
-    int r=fw_store(f,&m);if(!r)f->uploading=false;return r;
+    int r=fw_store(f,&m);if(!r){f->uploading=false;fw_log(f,FW_HISTORY_ABORTED,f->target,FW_OK,&f->incoming);}return r;
 }
 /** @brief Promote a validated trial image to the confirmed boot slot. */
 int fw_confirm(fw_update_t *f,uint32_t slot)
@@ -275,10 +288,15 @@ int fw_confirm(fw_update_t *f,uint32_t slot)
     if(slot!=f->meta.pending || !f->meta.trial)return FW_NOT_READY;
     if(fw_slot_valid(f,slot)!=FW_OK)return FW_BAD_IMAGE;
     fw_metadata_t m=f->meta;m.confirmed=slot;m.pending=FW_NONE;m.trial=0;m.flags|=FW_CONFIRMED;
-    return fw_store(f,&m);
+    int result=fw_store(f,&m);
+    if(!result)fw_log(f,FW_HISTORY_CONFIRMED,slot,FW_OK,&m.image[slot]);
+    return result;
 }
 /** @brief Clear sticky update warnings and the recorded error in persistent metadata. */
 int fw_clear_warnings(fw_update_t *f)
 {
-    fw_metadata_t m=f->meta;m.flags&=~FW_WARNINGS;m.last_error=FW_OK;return fw_store(f,&m);
+    fw_metadata_t m=f->meta;m.flags&=~FW_WARNINGS;m.last_error=FW_OK;
+    int result=fw_store(f,&m);
+    if(!result)fw_log(f,FW_HISTORY_WARNINGS_CLEARED,FW_NONE,FW_OK,NULL);
+    return result;
 }

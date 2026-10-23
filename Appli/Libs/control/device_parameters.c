@@ -1,6 +1,8 @@
 #include "device_parameters.h"
 #include "semper_flash.h"
 #include "xspi.h"
+#include "../../../common/firmware/fw_parameters.h"
+#include "tx_api.h"
 #include <string.h>
 
 /* Same 16-byte framing as VL9F/IMUF; PARM payload is UTF-8 JSON. */
@@ -21,6 +23,8 @@ static void set_payload(const uint8_t *json, uint32_t length)
     packet_size = 16U + length;
 }
 
+static int parameters_startup_read(void *context,uint32_t address,void *data,uint32_t size)
+{ return SEMPER_Read(context,address,data,size)==SEMPER_OK?0:-1; }
 /** @brief Read device parameters from flash and prepare JSON telemetry or an error payload. */
 void device_parameters_init(void)
 {
@@ -28,10 +32,17 @@ void device_parameters_init(void)
     static const uint8_t read_error[] = "{\"parameter_error\":\"flash read failed\"}";
     static const uint8_t missing[] = "{\"parameter_error\":\"parameters missing or too large\"}";
     /* Read offset zero indirectly; no dependency on FSBL mapping being left on. */
-    if (SEMPER_Init(&flash, &hxspi1) != SEMPER_OK ||
-        SEMPER_Read(&flash, 0U, packet + 16U, DEVICE_PARAMETERS_MAX_JSON) != SEMPER_OK)
+    uint32_t length;bool journal;
+    fw_io_t io={&flash,parameters_startup_read,NULL,NULL};
+    if (SEMPER_Init(&flash, &hxspi1) != SEMPER_OK)
     {
         set_payload(read_error, sizeof(read_error) - 1U);
+        return;
+    }
+    int result=fw_parameters_load(&io,packet+16U,&length,&journal);
+    if(result!=FW_OK){
+        if(result==FW_IO_ERROR)set_payload(read_error,sizeof(read_error)-1U);
+        else set_payload(missing,sizeof(missing)-1U);
         return;
     }
     for (uint32_t i = 0U; i < DEVICE_PARAMETERS_MAX_JSON; ++i)
@@ -48,9 +59,20 @@ void device_parameters_init(void)
     set_payload(missing, sizeof(missing) - 1U);
 }
 
-/** @brief Return the cached PARM packet and its byte length. */
-uint8_t *device_parameters_packet(uint32_t *size)
+void device_parameters_publish(const uint8_t *json,uint32_t length)
 {
-    *size = packet_size;
-    return packet;
+    if(!length || length>=DEVICE_PARAMETERS_MAX_JSON)return;
+    TX_INTERRUPT_SAVE_AREA
+    TX_DISABLE
+    set_payload(json,length);
+    TX_RESTORE
+}
+uint32_t device_parameters_copy_packet(uint8_t *destination,uint32_t capacity)
+{
+    TX_INTERRUPT_SAVE_AREA
+    TX_DISABLE
+    uint32_t size=packet_size<=capacity?packet_size:0U;
+    if(size)memcpy(destination,packet,size);
+    TX_RESTORE
+    return size;
 }

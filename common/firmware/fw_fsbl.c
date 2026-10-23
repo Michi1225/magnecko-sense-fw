@@ -1,5 +1,8 @@
 #include "fw_fsbl.h"
+#include "fw_history.h"
 #include <string.h>
+static void fsbl_log(fw_fsbl_t *f,uint32_t event,int result)
+{ (void)fw_history_record(f->history,event,FW_HISTORY_FSBL,(uint32_t)result,0,0,&f->incoming); }
 static uint32_t fsbl_u32(const uint8_t *p)
 { return p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
 static bool fsbl_size(uint32_t size)
@@ -41,7 +44,8 @@ int fw_fsbl_begin(fw_fsbl_t *f,uint32_t size,const uint8_t sha256[32])
     if(f->state!=FW_FSBL_IDLE || !f->active.size)return FW_NOT_READY;
     if(!fsbl_size(size))return FW_BAD_IMAGE;
     f->incoming=(fw_image_t){.size=size};memcpy(f->incoming.sha256,sha256,32);
-    f->received=0;f->error=FW_OK;f->state=FW_FSBL_RECEIVING;return FW_OK;
+    f->received=0;f->error=FW_OK;f->state=FW_FSBL_RECEIVING;
+    fsbl_log(f,FW_HISTORY_UPLOAD_STARTED,FW_OK);return FW_OK;
 }
 int fw_fsbl_data(fw_fsbl_t *f,uint32_t offset,const uint8_t *p,uint32_t size,uint32_t crc)
 {
@@ -59,6 +63,7 @@ int fw_fsbl_finish(fw_fsbl_t *f)
     if(result==FW_OK && memcmp(image.sha256,f->incoming.sha256,32))result=FW_BAD_HASH;
     f->error=(uint32_t)result;
     if(result==FW_OK)f->state=FW_FSBL_READY;
+    fsbl_log(f,result?FW_HISTORY_FAILED:FW_HISTORY_VERIFIED,result);
     return result;
 }
 /* Program the first 16-byte ECC unit last, after verifying the rest. An
@@ -93,16 +98,19 @@ int fw_fsbl_apply(fw_fsbl_t *f,const uint8_t expected[32])
         result=fsbl_read_active(f);
         if(result)return result; /* No erase without a validated RAM backup. */
     }
+    fsbl_log(f,FW_HISTORY_FSBL_APPLY,FW_OK);
     result=fsbl_program(f,f->staging,image.size);
-    if(result==FW_OK){f->active=image;f->state=FW_FSBL_INSTALLED;f->error=FW_OK;return FW_OK;}
+    if(result==FW_OK){f->active=image;f->state=FW_FSBL_INSTALLED;f->error=FW_OK;fsbl_log(f,FW_HISTORY_FSBL_INSTALLED,FW_OK);return FW_OK;}
     f->error=FW_IO_ERROR;
     if(f->backup_image.size && fsbl_program(f,f->backup,f->backup_image.size)==FW_OK){
         f->active=f->backup_image;f->state=FW_FSBL_READY;
-    } else {f->active=(fw_image_t){0};f->state=FW_FSBL_RECOVERY;}
+        fsbl_log(f,FW_HISTORY_FSBL_RESTORED,FW_IO_ERROR);
+    } else {f->active=(fw_image_t){0};f->state=FW_FSBL_RECOVERY;fsbl_log(f,FW_HISTORY_FSBL_RECOVERY,FW_IO_ERROR);}
     return FW_IO_ERROR;
 }
 int fw_fsbl_abort(fw_fsbl_t *f)
 {
     if(f->state==FW_FSBL_RECOVERY || f->state==FW_FSBL_INSTALLED)return FW_NOT_READY;
+    if(f->state!=FW_FSBL_IDLE)fsbl_log(f,FW_HISTORY_ABORTED,FW_OK);
     f->state=FW_FSBL_IDLE;f->received=0;f->error=FW_OK;f->incoming=(fw_image_t){0};return FW_OK;
 }

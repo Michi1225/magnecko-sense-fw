@@ -37,6 +37,7 @@
 /* USER CODE BEGIN Includes */
 #include "device_parameters.h"
 #include "IMU.h"
+#include "sensor_clock.h"
 #include "LEDController.h"
 #include "boot_diagnostics.h"
 /* USER CODE END Includes */
@@ -132,6 +133,7 @@ int main(void)
   USBPD_PreInitOs();
   /* USER CODE BEGIN 2 */
   app_boot_stage = APP_BOOT_PARAMETERS;
+  sensor_clock_init();
   device_parameters_init();
   
   /* USER CODE END 2 */
@@ -282,6 +284,7 @@ void PeriphCommonClock_Config(void)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
+  if (htim->Instance == TIM6) (void)sensor_clock_now_us();
 
   /* USER CODE END Callback 0 */
   if (htim->Instance == TIM6)

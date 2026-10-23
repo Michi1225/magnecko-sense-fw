@@ -197,10 +197,13 @@ void stream_thread_entry(ULONG argument)
         armed = false;
         SCB_InvalidateDCache_by_Addr((uint32_t *)sensor.g_csi_output_buffer,
                                     sizeof(sensor.g_csi_output_buffer));
-        memcpy(stream_packet, "VL9F", 4);
+        memcpy(stream_packet, "VL9T", 4);
         put_le32(stream_packet + 4, state.frames++);
         ULONG payload = (ULONG)sensor.csi_width * sensor.csi_height;
-        put_le32(stream_packet + 8, payload);
+        put_le32(stream_packet + 8, payload + 8U);
+        uint64_t timestamp = platform_frame_timestamp_us();
+        put_le32(stream_packet + 16, (uint32_t)timestamp);
+        put_le32(stream_packet + 20, (uint32_t)(timestamp >> 32));
         stream_packet[12] = sensor.csi_width; stream_packet[13] = 0;
         stream_packet[14] = sensor.csi_height; stream_packet[15] = 0;
         memcpy(stream_packet + STREAM_HEADER_SIZE, (const void *)sensor.g_csi_output_buffer, payload);

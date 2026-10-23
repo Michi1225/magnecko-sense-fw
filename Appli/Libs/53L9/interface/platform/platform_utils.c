@@ -22,6 +22,7 @@
 #include "vl53l9_device.h"
 #include "vl53l9_interface.h"
 #include "board_identity.h"
+#include "sensor_clock.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -35,6 +36,11 @@ extern DCMIPP_HandleTypeDef hdcmipp;
 extern I3C_HandleTypeDef hi3c2;
 
 static volatile platform_event_t g_platform_evt;
+static volatile uint64_t frame_timestamp_us;
+
+/* Snapshot capture stops at completion: the timestamp remains immutable until
+ * the owner copies the frame and rearms, including under transport backpressure. */
+uint64_t platform_frame_timestamp_us(void) { return frame_timestamp_us; }
 
 // the following are used during the I3C DAA procedure
 static unsigned int dev_count = 0;
@@ -405,6 +411,8 @@ void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin) {
 /** @brief Record completion of a frame on CSI capture pipe zero. */
 void HAL_DCMIPP_PIPE_FrameEventCallback(DCMIPP_HandleTypeDef *hdcmipp, uint32_t Pipe) {
     if (Pipe == DCMIPP_PIPE0) {
+        frame_timestamp_us = sensor_clock_now_us();
+        __DMB();
         g_platform_evt |= PLATFORM_CAM_PIPE_FRAME_EVT;
     }
 }

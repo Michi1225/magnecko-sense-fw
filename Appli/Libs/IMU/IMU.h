@@ -29,11 +29,14 @@ typedef struct
     lsm6dsv16x_fifo_out_raw_t f_data;
 
     float_t quat[4];
-    uint32_t timestamp_quat;
+    uint64_t timestamp_quat;
     float_t acc_mg[3];
-    uint32_t timestamp_acc;
+    uint64_t timestamp_acc;
     float_t gyro_mdps[3];
-    uint32_t timestamp_gyro;
+    uint64_t timestamp_gyro;
+    /* Timestamp tag and sensor entries may straddle FIFO drain calls. */
+    uint32_t fifo_timestamp, raw_acc, raw_gyro, raw_quat;
+    uint8_t fifo_count, fifo_timestamp_valid, timestamp_pending, fresh_timestamps;
     uint8_t valid_data;
     imu_config_t config;
 } IMU;

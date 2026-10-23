@@ -17,12 +17,13 @@
 #define STREAM_THREAD_PRIO           12U
 
 /* One transport consumer owns this packet until it sets STREAM_PACKET_CONSUMED.
- * Wire format: "VL9F", LE32 sequence, LE32 payload bytes, LE16 width,
- * LE16 height, then tightly packed RAW8 CSI data including the status row. */
+ * Wire format: "VL9T", LE32 sequence, LE32 payload bytes, LE16 width,
+ * LE16 height, then LE64 frame-completion microseconds and tightly packed RAW8 CSI data
+ * including the status row. Payload length includes the eight timestamp bytes. */
 #define STREAM_PACKET_READY       (1UL << 0)
 #define STREAM_PACKET_CONSUMED    (1UL << 1)
 #define STREAM_IMU_READY          (1UL << 2)
-#define STREAM_HEADER_SIZE        16U
+#define STREAM_HEADER_SIZE        24U
 extern TX_EVENT_FLAGS_GROUP stream_events;
 extern UCHAR stream_packet[STREAM_HEADER_SIZE + CSI_OUTPUT_PAYLOAD_SIZE];
 extern ULONG stream_packet_length;

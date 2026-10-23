@@ -163,10 +163,10 @@ void ethernet_stream_thread_entry(ULONG argument)
             write_transports(stream_packet, stream_packet_length);
             tx_event_flags_set(&stream_events, STREAM_PACKET_CONSUMED, TX_OR);
         }
-        ULONG packet[IMU_PACKET_WORDS];
+        UCHAR packet[IMU_PACKET_SIZE];
         for (unsigned i = 0; i < IMU_QUEUE_DEPTH; ++i)
         {
-            if (tx_queue_receive(&imu_packet_queue, packet, TX_NO_WAIT) != TX_SUCCESS) break;
+            if (!imu_stream_next_packet(packet)) break;
             write_transports((UCHAR *)packet, IMU_PACKET_SIZE);
         }
     }

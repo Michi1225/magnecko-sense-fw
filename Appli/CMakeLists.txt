@@ -111,6 +111,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ./Libs/control/stream_manager.c
     ./Libs/control/status_led.c
     ./Libs/control/boot_diagnostics.c
+    ./Libs/control/sensor_clock.c
     ./Libs/control/imu_stream.c
     ./Libs/control/imu_control.c
     ./Libs/control/ethernet_network.c

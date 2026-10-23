@@ -37,6 +37,8 @@ typedef struct
 
 } VL53L9_TypeDef_t;
 
+uint64_t platform_frame_timestamp_us(void);
+
 /** @brief Reset and address the ToF sensor, load its firmware, and apply the default profile. */
 HAL_StatusTypeDef VL53L9_init(VL53L9_TypeDef_t *tof);
 /** @brief Validate the requested geometry and configure the ToF sensor and CSI receiver. */
